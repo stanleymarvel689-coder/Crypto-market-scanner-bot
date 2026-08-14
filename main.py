@@ -5,14 +5,13 @@ import ccxt
 import pandas as pd
 import pandas_ta as ta
 
-# Load credentials from Environment / Secrets
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 EXCHANGE_ID = os.getenv('EXCHANGE_ID', 'bybit')
 
 def send_telegram_signal(symbol, market_type, direction, entry, sl, tp1, tp2, tp3):
     if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram keys missing. Skipping alert dispatch.")
+        print("Telegram secrets missing!")
         return
 
     message = f"""
@@ -36,7 +35,7 @@ Timeframe Confluence: **4H OB + 15M Confirmation**
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Failed to send Telegram signal: {e}")
+        print(f"Telegram dispatch failed: {e}")
 
 def run_scanner():
     try:
@@ -44,29 +43,36 @@ def run_scanner():
         exchange = exchange_class({'enableRateLimit': True})
         markets = exchange.load_markets()
     except Exception as e:
-        print(f"Error initializing exchange {EXCHANGE_ID}: {e}")
+        print(f"Exchange connection failed: {e}")
         return
 
-    pairs = [
-        symbol for symbol, market in markets.items()
-        if symbol.endswith('/USDT') and market.get('active', True)
-    ][:20]
+    # Filter active USDT trading pairs
+    pairs = []
+    for symbol, market in markets.items():
+        if symbol.endswith('/USDT') and market.get('active', True):
+            pairs.append(symbol)
+        if len(pairs) >= 20:
+            break
 
-    print(f"Scanning top pairs on {EXCHANGE_ID}...")
+    print(f"Scanning {len(pairs)} pairs on {EXCHANGE_ID}...")
 
     for symbol in pairs:
         try:
             bars = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-            if not bars:
+            if not bars or len(bars) < 20:
                 continue
+
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            df['rsi'] = ta.rsi(df['close'], length=14)
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            close = df['close'].iloc[-1]
-            rsi = df['rsi'].iloc[-1]
-            atr = df['atr'].iloc[-1]
+            rsi_series = ta.rsi(df['close'], length=14)
+            atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
+
+            if rsi_series is None or atr_series is None:
+                continue
+
+            close = float(df['close'].iloc[-1])
+            rsi = float(rsi_series.iloc[-1])
+            atr = float(atr_series.iloc[-1])
 
             if pd.isna(rsi) or pd.isna(atr):
                 continue
@@ -93,6 +99,7 @@ def run_scanner():
 
             time.sleep(0.2)
         except Exception as e:
+            print(f"Skipping {symbol}: {e}")
             continue
 
 if __name__ == "__main__":
