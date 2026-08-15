@@ -3,11 +3,25 @@ import time
 import requests
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 EXCHANGE_ID = os.getenv('EXCHANGE_ID', 'bybit')
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
 
 def send_telegram_signal(symbol, market_type, direction, entry, sl, tp1, tp2, tp3):
     if not BOT_TOKEN or not CHAT_ID:
@@ -46,7 +60,6 @@ def run_scanner():
         print(f"Exchange connection failed: {e}")
         return
 
-    # Filter active USDT trading pairs
     pairs = []
     for symbol, market in markets.items():
         if symbol.endswith('/USDT') and market.get('active', True):
@@ -64,15 +77,12 @@ def run_scanner():
 
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            rsi_series = ta.rsi(df['close'], length=14)
-            atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
-
-            if rsi_series is None or atr_series is None:
-                continue
+            df['rsi'] = calculate_rsi(df['close'], period=14)
+            df['atr'] = calculate_atr(df, period=14)
 
             close = float(df['close'].iloc[-1])
-            rsi = float(rsi_series.iloc[-1])
-            atr = float(atr_series.iloc[-1])
+            rsi = float(df['rsi'].iloc[-1])
+            atr = float(df['atr'].iloc[-1])
 
             if pd.isna(rsi) or pd.isna(atr):
                 continue
