@@ -7,7 +7,7 @@ import numpy as np
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
-EXCHANGE_ID = os.getenv('EXCHANGE_ID', 'bybit')
+EXCHANGE_ID = os.getenv('EXCHANGE_ID', 'okx')
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -49,27 +49,38 @@ Timeframe Confluence: **4H OB + 15M Confirmation**
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram dispatch failed: {e}")
+        print(f"Telegram dispatch failed for {symbol}: {e}")
 
 def run_scanner():
     try:
         exchange_class = getattr(ccxt, EXCHANGE_ID)
         exchange = exchange_class({'enableRateLimit': True})
+        
+        print("Loading market pairs...")
         markets = exchange.load_markets()
+        
+        print("Fetching 24h market tickers...")
+        tickers = exchange.fetch_tickers()
     except Exception as e:
-        print(f"Exchange connection failed: {e}")
+        print(f"Exchange connection error: {e}")
         return
 
-    pairs = []
-    for symbol, market in markets.items():
-        if symbol.endswith('/USDT') and market.get('active', True):
-            pairs.append(symbol)
-        if len(pairs) >= 20:
-            break
+    # Filter for active USDT spot pairs
+    usdt_pairs = []
+    for symbol, ticker in tickers.items():
+        if symbol in markets and symbol.endswith('/USDT'):
+            market = markets[symbol]
+            if market.get('active', True) and market.get('spot', True):
+                vol = ticker.get('quoteVolume') or ticker.get('baseVolume') or 0
+                usdt_pairs.append({'symbol': symbol, 'volume': vol})
 
-    print(f"Scanning {len(pairs)} pairs on {EXCHANGE_ID}...")
+    # Sort descending by 24h volume and select top 100
+    usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
+    top_100_pairs = [p['symbol'] for p in usdt_pairs[:100]]
 
-    for symbol in pairs:
+    print(f"Successfully loaded Top {len(top_100_pairs)} volume pairs on {EXCHANGE_ID.upper()}. Starting scanner...")
+
+    for symbol in top_100_pairs:
         try:
             bars = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
             if not bars or len(bars) < 20:
@@ -84,33 +95,37 @@ def run_scanner():
             rsi = float(df['rsi'].iloc[-1])
             atr = float(df['atr'].iloc[-1])
 
-            if pd.isna(rsi) or pd.isna(atr):
+            if pd.isna(rsi) or pd.isna(atr) or atr == 0:
                 continue
 
             entry = round(close, 4)
 
-            if rsi < 35:
+            # Signal conditions (< 40 Bullish Long, > 60 Bearish Short)
+            if rsi < 40:
                 direction = "BULLISH LONG 🟢"
                 sl = round(entry - (1.5 * atr), 4)
                 tp1 = round(entry + (2.0 * atr), 4)
                 tp2 = round(entry + (4.0 * atr), 4)
                 tp3 = round(entry + (6.0 * atr), 4)
                 send_telegram_signal(symbol, "SPOT/FUTURES", direction, entry, sl, tp1, tp2, tp3)
-                print(f"✅ Alert sent for {symbol}")
+                print(f"✅ Alert sent for {symbol} (RSI: {round(rsi, 2)})")
 
-            elif rsi > 65:
+            elif rsi > 60:
                 direction = "BEARISH SHORT 🔴"
                 sl = round(entry + (1.5 * atr), 4)
                 tp1 = round(entry - (2.0 * atr), 4)
                 tp2 = round(entry - (4.0 * atr), 4)
                 tp3 = round(entry - (6.0 * atr), 4)
                 send_telegram_signal(symbol, "SPOT/FUTURES", direction, entry, sl, tp1, tp2, tp3)
-                print(f"✅ Alert sent for {symbol}")
+                print(f"✅ Alert sent for {symbol} (RSI: {round(rsi, 2)})")
 
-            time.sleep(0.2)
+            time.sleep(0.1)  # Prevent rate limit throttling
         except Exception as e:
             print(f"Skipping {symbol}: {e}")
             continue
 
+    print("Scan complete!")
+
 if __name__ == "__main__":
     run_scanner()
+        
